@@ -129,6 +129,12 @@ contract CommitRevealAIJudge is PrecompileConsumer {
         address indexed submitter
     );
 
+    event AllAnswersJudged(
+        uint256 indexed bountyId,
+        uint256 revealedCount,
+        bytes aiReview
+    );
+
     // ─────────────────────────────────────────────────────────────────────────
     //  Errors
     // ─────────────────────────────────────────────────────────────────────────
@@ -146,6 +152,12 @@ contract CommitRevealAIJudge is PrecompileConsumer {
     error AlreadyRevealed();
     error AnswerTooLong();
     error CommitmentMismatch();
+    error NotBountyOwner();
+    error RevealPhaseNotOver();
+    error AlreadyJudged();
+    error AlreadyFinalized();
+    error NoRevealedSubmissions();
+    error JudgingFailed(string reason);
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Modifiers
@@ -153,6 +165,11 @@ contract CommitRevealAIJudge is PrecompileConsumer {
 
     modifier bountyExists(uint256 bountyId) {
         if (bounties[bountyId].owner == address(0)) revert BountyNotFound();
+        _;
+    }
+
+    modifier onlyOwner(uint256 bountyId) {
+        if (msg.sender != bounties[bountyId].owner) revert NotBountyOwner();
         _;
     }
 
@@ -296,5 +313,68 @@ contract CommitRevealAIJudge is PrecompileConsumer {
         }
 
         emit AnswerRevealed(bountyId, indexPlusOne - 1, msg.sender);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Judging — single batched LLM call over all revealed answers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Judge every revealed answer in one batched Ritual LLM request.
+     * @dev    Only the bounty owner, only after the reveal deadline, and only if
+     *         at least one answer was revealed. The `llmInput` is built off-chain
+     *         (see web/src/lib/ritualLlm.ts) and contains ALL revealed answers in
+     *         a single prompt — never one LLM call per answer. The raw completion
+     *         bytes are stored verbatim; parsing/validation happens off-chain and
+     *         a human owner makes the final call via `finalizeWinner`.
+     * @param  bountyId Target bounty.
+     * @param  llmInput ABI-encoded batch request forwarded to the LLM precompile.
+     */
+    function judgeAll(
+        uint256 bountyId,
+        bytes calldata llmInput
+    ) external bountyExists(bountyId) onlyOwner(bountyId) {
+        Bounty storage bounty = bounties[bountyId];
+
+        if (block.timestamp < bounty.revealDeadline) {
+            revert RevealPhaseNotOver();
+        }
+        if (bounty.judged) revert AlreadyJudged();
+        if (bounty.finalized) revert AlreadyFinalized();
+        if (bounty.revealedCount == 0) revert NoRevealedSubmissions();
+
+        bytes memory review = _judge(llmInput);
+
+        bounty.judged = true;
+        bounty.aiReview = review;
+
+        emit AllAnswersJudged(bountyId, bounty.revealedCount, review);
+    }
+
+    /**
+     * @dev Forward the batch request to Ritual's LLM inference precompile and
+     *      return the completion bytes. Isolated and marked `virtual` so tests can
+     *      override it with a deterministic result — the precompile is only
+     *      available on Ritual Chain, not in a local EVM.
+     */
+    function _judge(
+        bytes calldata llmInput
+    ) internal virtual returns (bytes memory) {
+        bytes memory output = _executePrecompile(
+            LLM_INFERENCE_PRECOMPILE,
+            llmInput
+        );
+
+        (
+            bool hasError,
+            bytes memory completionData,
+            ,
+            string memory errorMessage,
+
+        ) = abi.decode(output, (bool, bytes, bytes, string, ConvoHistory));
+
+        if (hasError) revert JudgingFailed(errorMessage);
+
+        return completionData;
     }
 }
