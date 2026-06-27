@@ -486,4 +486,125 @@ contract CommitRevealAIJudgeTest is Test {
         );
         judge.judgeAll(id, hex"01");
     }
+
+    // ── finalization ────────────────────────────────────────────────────────────
+
+    function test_FinalizeWinner_PaysExactlyOneWinner() public {
+        uint256 id = _twoRevealedReadyToJudge();
+        vm.prank(owner);
+        judge.judgeAll(id, hex"01");
+
+        uint256 balBefore = alice.balance;
+        vm.prank(owner);
+        judge.finalizeWinner(id, 0); // alice is index 0
+
+        assertEq(alice.balance, balBefore + REWARD, "winner paid the reward");
+        CommitRevealAIJudge.BountyView memory b = judge.getBounty(id);
+        assertTrue(b.finalized, "finalized");
+        assertEq(b.winnerIndex, 0, "winner index recorded");
+        assertEq(b.reward, 0, "escrow drained");
+        assertEq(address(judge).balance, 0, "no funds left in contract");
+    }
+
+    function test_FinalizeWinner_RevertsNotJudged() public {
+        uint256 id = _twoRevealedReadyToJudge();
+        vm.prank(owner);
+        vm.expectRevert(CommitRevealAIJudge.NotJudged.selector);
+        judge.finalizeWinner(id, 0);
+    }
+
+    function test_FinalizeWinner_RevertsNonOwner() public {
+        uint256 id = _twoRevealedReadyToJudge();
+        vm.prank(owner);
+        judge.judgeAll(id, hex"01");
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.NotBountyOwner.selector);
+        judge.finalizeWinner(id, 0);
+    }
+
+    function test_FinalizeWinner_RevertsInvalidIndex() public {
+        uint256 id = _twoRevealedReadyToJudge();
+        vm.prank(owner);
+        judge.judgeAll(id, hex"01");
+        vm.prank(owner);
+        vm.expectRevert(CommitRevealAIJudge.InvalidWinnerIndex.selector);
+        judge.finalizeWinner(id, 99);
+    }
+
+    function test_FinalizeWinner_RevertsUnrevealedWinner() public {
+        (uint256 id, uint64 subDl, uint64 revDl) = _createBounty();
+        bytes32 sa = bytes32(uint256(1));
+        _commit(alice, id, "a", sa);
+        _commit(bob, id, "b", bytes32(uint256(2))); // bob never reveals
+        vm.warp(subDl);
+        _reveal(alice, id, "a", sa);
+        vm.warp(revDl);
+        vm.prank(owner);
+        judge.judgeAll(id, hex"01");
+
+        vm.prank(owner);
+        vm.expectRevert(CommitRevealAIJudge.WinnerNotRevealed.selector);
+        judge.finalizeWinner(id, 1); // bob (unrevealed) is ineligible
+    }
+
+    function test_FinalizeWinner_RevertsDoubleFinalize() public {
+        uint256 id = _twoRevealedReadyToJudge();
+        vm.prank(owner);
+        judge.judgeAll(id, hex"01");
+        vm.prank(owner);
+        judge.finalizeWinner(id, 0);
+        vm.prank(owner);
+        vm.expectRevert(CommitRevealAIJudge.AlreadyFinalized.selector);
+        judge.finalizeWinner(id, 1);
+    }
+
+    function test_FinalizeWinner_ReentrancyIsBlocked() public {
+        ReentrantWinner attacker = new ReentrantWinner(judge);
+        (uint256 id, uint64 subDl, uint64 revDl) = _createBounty();
+
+        bytes32 s = bytes32(uint256(0xBEEF));
+        bytes32 c = keccak256(abi.encodePacked("a", s, address(attacker), id));
+        vm.prank(address(attacker));
+        judge.submitCommitment(id, c);
+        vm.warp(subDl);
+        vm.prank(address(attacker));
+        judge.revealAnswer(id, "a", s);
+        vm.warp(revDl);
+        vm.prank(owner);
+        judge.judgeAll(id, hex"01");
+
+        attacker.arm(id, 0);
+        // The reentrant call inside receive() trips the guard, the payout fails,
+        // and the whole finalize reverts — no double spend.
+        vm.prank(owner);
+        vm.expectRevert(CommitRevealAIJudge.PaymentFailed.selector);
+        judge.finalizeWinner(id, 0);
+
+        assertEq(address(judge).balance, REWARD, "escrow untouched");
+    }
+}
+
+
+/// @dev Malicious winner that tries to re-enter finalizeWinner during payout.
+contract ReentrantWinner {
+    CommitRevealAIJudge public immutable target;
+    uint256 public bountyId;
+    uint256 public winnerIndex;
+    bool public attacked;
+
+    constructor(CommitRevealAIJudge t) {
+        target = t;
+    }
+
+    function arm(uint256 b, uint256 w) external {
+        bountyId = b;
+        winnerIndex = w;
+    }
+
+    receive() external payable {
+        if (!attacked) {
+            attacked = true;
+            target.finalizeWinner(bountyId, winnerIndex);
+        }
+    }
 }
