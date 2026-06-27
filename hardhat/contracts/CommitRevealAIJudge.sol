@@ -103,6 +103,9 @@ contract CommitRevealAIJudge is PrecompileConsumer {
     ///      struct that contains a mapping; explicit view functions are exposed.
     mapping(uint256 => Bounty) private bounties;
 
+    /// @dev Reentrancy guard state: 1 = unlocked, 2 = locked.
+    uint256 private _locked = 1;
+
     // ─────────────────────────────────────────────────────────────────────────
     //  Events
     // ─────────────────────────────────────────────────────────────────────────
@@ -135,6 +138,13 @@ contract CommitRevealAIJudge is PrecompileConsumer {
         bytes aiReview
     );
 
+    event WinnerFinalized(
+        uint256 indexed bountyId,
+        uint256 indexed winnerIndex,
+        address indexed winner,
+        uint256 reward
+    );
+
     // ─────────────────────────────────────────────────────────────────────────
     //  Errors
     // ─────────────────────────────────────────────────────────────────────────
@@ -158,6 +168,11 @@ contract CommitRevealAIJudge is PrecompileConsumer {
     error AlreadyFinalized();
     error NoRevealedSubmissions();
     error JudgingFailed(string reason);
+    error NotJudged();
+    error InvalidWinnerIndex();
+    error WinnerNotRevealed();
+    error PaymentFailed();
+    error ReentrantCall();
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Modifiers
@@ -171,6 +186,13 @@ contract CommitRevealAIJudge is PrecompileConsumer {
     modifier onlyOwner(uint256 bountyId) {
         if (msg.sender != bounties[bountyId].owner) revert NotBountyOwner();
         _;
+    }
+
+    modifier nonReentrant() {
+        if (_locked != 1) revert ReentrantCall();
+        _locked = 2;
+        _;
+        _locked = 1;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -376,5 +398,46 @@ contract CommitRevealAIJudge is PrecompileConsumer {
         if (hasError) revert JudgingFailed(errorMessage);
 
         return completionData;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Finalization — human-in-the-loop payout to exactly one winner
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Finalize a bounty by paying the reward to exactly one winner.
+     * @dev    Only the owner, only after judging, only once. The winner must be a
+     *         revealed submission (unrevealed entries are never eligible). Uses
+     *         checks-effects-interactions plus a reentrancy guard around the
+     *         external value transfer.
+     * @param  bountyId    Target bounty.
+     * @param  winnerIndex Index into the bounty's submissions array.
+     */
+    function finalizeWinner(
+        uint256 bountyId,
+        uint256 winnerIndex
+    ) external bountyExists(bountyId) onlyOwner(bountyId) nonReentrant {
+        Bounty storage bounty = bounties[bountyId];
+
+        if (!bounty.judged) revert NotJudged();
+        if (bounty.finalized) revert AlreadyFinalized();
+        if (winnerIndex >= bounty.submissions.length) {
+            revert InvalidWinnerIndex();
+        }
+
+        Submission storage winnerSub = bounty.submissions[winnerIndex];
+        if (!winnerSub.revealed) revert WinnerNotRevealed();
+
+        // Effects before interaction.
+        bounty.finalized = true;
+        bounty.winnerIndex = winnerIndex;
+        uint256 reward = bounty.reward;
+        bounty.reward = 0;
+        address winner = winnerSub.submitter;
+
+        (bool ok, ) = payable(winner).call{value: reward}("");
+        if (!ok) revert PaymentFailed();
+
+        emit WinnerFinalized(bountyId, winnerIndex, winner, reward);
     }
 }
