@@ -123,6 +123,12 @@ contract CommitRevealAIJudge is PrecompileConsumer {
         bytes32 commitment
     );
 
+    event AnswerRevealed(
+        uint256 indexed bountyId,
+        uint256 indexed submissionIndex,
+        address indexed submitter
+    );
+
     // ─────────────────────────────────────────────────────────────────────────
     //  Errors
     // ─────────────────────────────────────────────────────────────────────────
@@ -134,6 +140,12 @@ contract CommitRevealAIJudge is PrecompileConsumer {
     error ZeroCommitment();
     error AlreadyCommitted();
     error TooManySubmissions();
+    error RevealPhaseNotStarted();
+    error RevealPhaseOver();
+    error NoCommitment();
+    error AlreadyRevealed();
+    error AnswerTooLong();
+    error CommitmentMismatch();
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Modifiers
@@ -237,5 +249,52 @@ contract CommitRevealAIJudge is PrecompileConsumer {
             msg.sender,
             commitment
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Reveal phase — open commitments after the submission deadline
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Reveal a previously committed answer. Valid only after the
+     *         submission deadline and before the reveal deadline.
+     * @dev    Recomputes keccak256(abi.encodePacked(answer, salt, msg.sender,
+     *         bountyId)) and requires it to equal the stored commitment. Only
+     *         successfully revealed submissions become eligible for judging.
+     * @param  bountyId Target bounty.
+     * @param  answer   The plaintext answer being revealed.
+     * @param  salt     The secret salt used when building the commitment.
+     */
+    function revealAnswer(
+        uint256 bountyId,
+        string calldata answer,
+        bytes32 salt
+    ) external bountyExists(bountyId) {
+        Bounty storage bounty = bounties[bountyId];
+
+        if (block.timestamp < bounty.submissionDeadline) {
+            revert RevealPhaseNotStarted();
+        }
+        if (block.timestamp >= bounty.revealDeadline) revert RevealPhaseOver();
+
+        uint256 indexPlusOne = bounty.committerIndexPlusOne[msg.sender];
+        if (indexPlusOne == 0) revert NoCommitment();
+        if (bytes(answer).length > MAX_ANSWER_LENGTH) revert AnswerTooLong();
+
+        Submission storage submission = bounty.submissions[indexPlusOne - 1];
+        if (submission.revealed) revert AlreadyRevealed();
+
+        bytes32 expected = keccak256(
+            abi.encodePacked(answer, salt, msg.sender, bountyId)
+        );
+        if (expected != submission.commitment) revert CommitmentMismatch();
+
+        submission.answer = answer;
+        submission.revealed = true;
+        unchecked {
+            bounty.revealedCount += 1;
+        }
+
+        emit AnswerRevealed(bountyId, indexPlusOne - 1, msg.sender);
     }
 }
