@@ -82,6 +82,23 @@ contract CommitRevealAIJudge is PrecompileConsumer {
         string secretsName;
     }
 
+    /// @dev Flat, memory-returnable view of a bounty (no mapping / no array of
+    ///      structs) so `getBounty` can return a single decoded object.
+    struct BountyView {
+        address owner;
+        string title;
+        string rubric;
+        uint256 reward;
+        uint64 submissionDeadline;
+        uint64 revealDeadline;
+        bool judged;
+        bool finalized;
+        uint256 submissionCount;
+        uint256 revealedCount;
+        uint256 winnerIndex;
+        bytes aiReview;
+    }
+
     struct Bounty {
         address owner;
         string title;
@@ -173,6 +190,7 @@ contract CommitRevealAIJudge is PrecompileConsumer {
     error WinnerNotRevealed();
     error PaymentFailed();
     error ReentrantCall();
+    error InvalidIndex();
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Modifiers
@@ -439,5 +457,105 @@ contract CommitRevealAIJudge is PrecompileConsumer {
         if (!ok) revert PaymentFailed();
 
         emit WinnerFinalized(bountyId, winnerIndex, winner, reward);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Views & helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @notice Read the public, non-secret fields of a bounty.
+    function getBounty(
+        uint256 bountyId
+    ) external view bountyExists(bountyId) returns (BountyView memory) {
+        Bounty storage bounty = bounties[bountyId];
+        return
+            BountyView({
+                owner: bounty.owner,
+                title: bounty.title,
+                rubric: bounty.rubric,
+                reward: bounty.reward,
+                submissionDeadline: bounty.submissionDeadline,
+                revealDeadline: bounty.revealDeadline,
+                judged: bounty.judged,
+                finalized: bounty.finalized,
+                submissionCount: bounty.submissions.length,
+                revealedCount: bounty.revealedCount,
+                winnerIndex: bounty.winnerIndex,
+                aiReview: bounty.aiReview
+            });
+    }
+
+    /**
+     * @notice Read a single submission. Before a valid reveal, `answer` is empty
+     *         and `revealed` is false — the plaintext is never exposed early.
+     */
+    function getSubmission(
+        uint256 bountyId,
+        uint256 index
+    )
+        external
+        view
+        bountyExists(bountyId)
+        returns (
+            address submitter,
+            bytes32 commitment,
+            bool revealed,
+            string memory answer
+        )
+    {
+        Bounty storage bounty = bounties[bountyId];
+        if (index >= bounty.submissions.length) revert InvalidIndex();
+        Submission storage submission = bounty.submissions[index];
+        return (
+            submission.submitter,
+            submission.commitment,
+            submission.revealed,
+            submission.answer
+        );
+    }
+
+    /// @notice Look up a participant's commitment status for a bounty.
+    function getCommitment(
+        uint256 bountyId,
+        address participant
+    )
+        external
+        view
+        bountyExists(bountyId)
+        returns (bool committed, uint256 index, bytes32 commitment, bool revealed)
+    {
+        Bounty storage bounty = bounties[bountyId];
+        uint256 indexPlusOne = bounty.committerIndexPlusOne[participant];
+        if (indexPlusOne == 0) {
+            return (false, 0, bytes32(0), false);
+        }
+        Submission storage submission = bounty.submissions[indexPlusOne - 1];
+        return (
+            true,
+            indexPlusOne - 1,
+            submission.commitment,
+            submission.revealed
+        );
+    }
+
+    /// @notice Number of commitments submitted to a bounty.
+    function submissionCount(
+        uint256 bountyId
+    ) external view bountyExists(bountyId) returns (uint256) {
+        return bounties[bountyId].submissions.length;
+    }
+
+    /**
+     * @notice Pure helper that reproduces the on-chain commitment formula, so
+     *         front-ends and tests build commitments identically to verification.
+     * @return The keccak256 commitment for the given inputs.
+     */
+    function computeCommitment(
+        string calldata answer,
+        bytes32 salt,
+        address submitter,
+        uint256 bountyId
+    ) external pure returns (bytes32) {
+        return keccak256(abi.encodePacked(answer, salt, submitter, bountyId));
     }
 }
