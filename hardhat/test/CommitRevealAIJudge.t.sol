@@ -374,4 +374,36 @@ contract CommitRevealAIJudgeTest is Test {
         vm.expectRevert(CommitRevealAIJudge.AnswerTooLong.selector);
         judge.revealAnswer(id, longAnswer, salt);
     }
+
+    // ── reveal window boundaries ────────────────────────────────────────────────
+
+    function test_Reveal_RevertsBeforeSubmissionDeadline() public {
+        (uint256 id, , ) = _createBounty();
+        bytes32 salt = bytes32(uint256(1));
+        _commit(alice, id, "a", salt);
+        // Still inside the submission phase: revealing is not allowed yet.
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.RevealPhaseNotStarted.selector);
+        judge.revealAnswer(id, "a", salt);
+    }
+
+    function test_Reveal_RevertsAtExactRevealDeadline() public {
+        (uint256 id, , uint64 revDl) = _createBounty();
+        bytes32 salt = bytes32(uint256(2));
+        _commit(alice, id, "a", salt);
+        vm.warp(revDl); // exactly at the reveal deadline => closed (>=)
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.RevealPhaseOver.selector);
+        judge.revealAnswer(id, "a", salt);
+    }
+
+    function test_Reveal_WorksJustBeforeRevealDeadline() public {
+        (uint256 id, , uint64 revDl) = _createBounty();
+        bytes32 salt = bytes32(uint256(3));
+        _commit(alice, id, "a", salt);
+        vm.warp(uint256(revDl) - 1); // last valid second
+        _reveal(alice, id, "a", salt);
+        (, , bool revealed, ) = judge.getSubmission(id, 0);
+        assertTrue(revealed, "reveal accepted at edge of window");
+    }
 }
