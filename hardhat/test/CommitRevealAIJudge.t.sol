@@ -289,4 +289,89 @@ contract CommitRevealAIJudgeTest is Test {
         (, , , bool revealedFlag) = judge.getCommitment(id, alice);
         assertTrue(revealedFlag, "commitment marked revealed");
     }
+
+    // ── invalid reveals ─────────────────────────────────────────────────────────
+
+    function _stringOfLength(uint256 n) internal pure returns (string memory) {
+        bytes memory b = new bytes(n);
+        for (uint256 i = 0; i < n; i++) {
+            b[i] = "a";
+        }
+        return string(b);
+    }
+
+    function test_Reveal_RevertsWrongSalt() public {
+        (uint256 id, uint64 subDl, ) = _createBounty();
+        _commit(alice, id, "answer", bytes32(uint256(1)));
+        vm.warp(subDl);
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.CommitmentMismatch.selector);
+        judge.revealAnswer(id, "answer", bytes32(uint256(2)));
+    }
+
+    function test_Reveal_RevertsWrongAnswer() public {
+        (uint256 id, uint64 subDl, ) = _createBounty();
+        bytes32 salt = bytes32(uint256(3));
+        _commit(alice, id, "answer", salt);
+        vm.warp(subDl);
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.CommitmentMismatch.selector);
+        judge.revealAnswer(id, "tampered-answer", salt);
+    }
+
+    /// A copycat who re-uses someone else's commitment hash cannot reveal it,
+    /// because msg.sender is bound into the hash.
+    function test_Reveal_RevertsImpersonation() public {
+        (uint256 id, uint64 subDl, ) = _createBounty();
+        string memory answer = "stolen idea";
+        bytes32 salt = bytes32(uint256(5));
+
+        // Bob copies Alice's commitment (bound to ALICE) and submits it himself.
+        bytes32 aliceBound = keccak256(
+            abi.encodePacked(answer, salt, alice, id)
+        );
+        vm.prank(bob);
+        judge.submitCommitment(id, aliceBound);
+
+        vm.warp(subDl);
+        // When Bob reveals, the contract recomputes with msg.sender = bob.
+        vm.prank(bob);
+        vm.expectRevert(CommitRevealAIJudge.CommitmentMismatch.selector);
+        judge.revealAnswer(id, answer, salt);
+    }
+
+    function test_Reveal_RevertsDoubleReveal() public {
+        (uint256 id, uint64 subDl, ) = _createBounty();
+        bytes32 salt = bytes32(uint256(6));
+        _commit(alice, id, "answer", salt);
+        vm.warp(subDl);
+        _reveal(alice, id, "answer", salt);
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.AlreadyRevealed.selector);
+        judge.revealAnswer(id, "answer", salt);
+    }
+
+    function test_Reveal_RevertsNoCommitment() public {
+        (uint256 id, uint64 subDl, ) = _createBounty();
+        vm.warp(subDl);
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.NoCommitment.selector);
+        judge.revealAnswer(id, "answer", bytes32(uint256(1)));
+    }
+
+    function test_Reveal_RevertsAnswerTooLong() public {
+        (uint256 id, uint64 subDl, ) = _createBounty();
+        uint256 maxLen = judge.MAX_ANSWER_LENGTH();
+        string memory longAnswer = _stringOfLength(maxLen + 1);
+        bytes32 salt = bytes32(uint256(9));
+
+        bytes32 c = keccak256(abi.encodePacked(longAnswer, salt, alice, id));
+        vm.prank(alice);
+        judge.submitCommitment(id, c);
+
+        vm.warp(subDl);
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.AnswerTooLong.selector);
+        judge.revealAnswer(id, longAnswer, salt);
+    }
 }
