@@ -245,4 +245,48 @@ contract CommitRevealAIJudgeTest is Test {
         assertEq(commitment, c, "commitment matches");
         assertFalse(revealed, "not revealed");
     }
+
+    // ── helper: reveal ─────────────────────────────────────────────────────────
+
+    function _reveal(
+        address who,
+        uint256 id,
+        string memory answer,
+        bytes32 salt
+    ) internal {
+        vm.prank(who);
+        judge.revealAnswer(id, answer, salt);
+    }
+
+    // ── computeCommitment parity + valid reveal ────────────────────────────────
+
+    function test_ComputeCommitment_MatchesContractFormula() public {
+        (uint256 id, , ) = _createBounty();
+        string memory answer = "the answer";
+        bytes32 salt = keccak256("a-secret-salt");
+
+        bytes32 onchain = judge.computeCommitment(answer, salt, alice, id);
+        bytes32 local = keccak256(abi.encodePacked(answer, salt, alice, id));
+        assertEq(onchain, local, "helper reproduces verification formula");
+    }
+
+    function test_Reveal_Valid_StoresAnswerAndCounts() public {
+        (uint256 id, uint64 subDl, ) = _createBounty();
+        string memory answer = "alice's winning answer";
+        bytes32 salt = bytes32(uint256(0xABCD));
+
+        _commit(alice, id, answer, salt);
+        vm.warp(subDl); // reveal window opens at the submission deadline
+        _reveal(alice, id, answer, salt);
+
+        (, , bool revealed, string memory got) = judge.getSubmission(id, 0);
+        assertTrue(revealed, "marked revealed");
+        assertEq(got, answer, "plaintext now readable");
+
+        CommitRevealAIJudge.BountyView memory b = judge.getBounty(id);
+        assertEq(b.revealedCount, 1, "revealedCount incremented");
+
+        (, , , bool revealedFlag) = judge.getCommitment(id, alice);
+        assertTrue(revealedFlag, "commitment marked revealed");
+    }
 }
