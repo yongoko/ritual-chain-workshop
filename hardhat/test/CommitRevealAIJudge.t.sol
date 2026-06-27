@@ -143,4 +143,106 @@ contract CommitRevealAIJudgeTest is Test {
         vm.expectRevert(CommitRevealAIJudge.BountyNotFound.selector);
         judge.getBounty(999);
     }
+
+    // ── helper: commit ─────────────────────────────────────────────────────────
+
+    function _commit(
+        address who,
+        uint256 id,
+        string memory answer,
+        bytes32 salt
+    ) internal returns (bytes32 commitment) {
+        commitment = keccak256(abi.encodePacked(answer, salt, who, id));
+        vm.prank(who);
+        judge.submitCommitment(id, commitment);
+    }
+
+    // ── submitCommitment ───────────────────────────────────────────────────────
+
+    function test_SubmitCommitment_StoresHiddenAndCounts() public {
+        (uint256 id, , ) = _createBounty();
+        bytes32 c = _commit(alice, id, "answer-a", bytes32(uint256(0xA11CE)));
+
+        (
+            address submitter,
+            bytes32 commitment,
+            bool revealed,
+            string memory answer
+        ) = judge.getSubmission(id, 0);
+
+        assertEq(submitter, alice, "submitter recorded");
+        assertEq(commitment, c, "commitment stored");
+        assertFalse(revealed, "not revealed yet");
+        assertEq(bytes(answer).length, 0, "answer stays hidden before reveal");
+        assertEq(judge.submissionCount(id), 1, "one submission");
+    }
+
+    function test_SubmitCommitment_RevertsAfterDeadline() public {
+        (uint256 id, uint64 subDl, ) = _createBounty();
+        vm.warp(subDl); // exactly at the deadline => closed (>=)
+        bytes32 c = keccak256(abi.encodePacked("x", bytes32(uint256(1)), alice, id));
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.SubmissionPhaseOver.selector);
+        judge.submitCommitment(id, c);
+    }
+
+    function test_SubmitCommitment_RevertsZeroCommitment() public {
+        (uint256 id, , ) = _createBounty();
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.ZeroCommitment.selector);
+        judge.submitCommitment(id, bytes32(0));
+    }
+
+    function test_SubmitCommitment_RevertsAlreadyCommitted() public {
+        (uint256 id, , ) = _createBounty();
+        _commit(alice, id, "a", bytes32(uint256(1)));
+        bytes32 c2 = keccak256(abi.encodePacked("b", bytes32(uint256(2)), alice, id));
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.AlreadyCommitted.selector);
+        judge.submitCommitment(id, c2);
+    }
+
+    function test_SubmitCommitment_RevertsUnknownBounty() public {
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.BountyNotFound.selector);
+        judge.submitCommitment(42, keccak256("x"));
+    }
+
+    function test_SubmitCommitment_RevertsWhenFull() public {
+        (uint256 id, , ) = _createBounty();
+        uint256 max = judge.MAX_SUBMISSIONS();
+        for (uint256 i = 0; i < max; i++) {
+            address p = address(uint160(1000 + i));
+            bytes32 c = keccak256(abi.encodePacked("ans", i, p, id));
+            vm.prank(p);
+            judge.submitCommitment(id, c);
+        }
+        assertEq(judge.submissionCount(id), max, "filled to capacity");
+
+        address extra = address(uint160(99_999));
+        bytes32 ce = keccak256(abi.encodePacked("x", extra, id));
+        vm.prank(extra);
+        vm.expectRevert(CommitRevealAIJudge.TooManySubmissions.selector);
+        judge.submitCommitment(id, ce);
+    }
+
+    function test_GetCommitment_TracksParticipant() public {
+        (uint256 id, , ) = _createBounty();
+
+        (bool committed0, , , ) = judge.getCommitment(id, alice);
+        assertFalse(committed0, "no commitment initially");
+
+        bytes32 c = _commit(alice, id, "a", bytes32(uint256(7)));
+
+        (
+            bool committed,
+            uint256 index,
+            bytes32 commitment,
+            bool revealed
+        ) = judge.getCommitment(id, alice);
+        assertTrue(committed, "now committed");
+        assertEq(index, 0, "index 0");
+        assertEq(commitment, c, "commitment matches");
+        assertFalse(revealed, "not revealed");
+    }
 }
