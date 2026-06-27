@@ -116,6 +116,13 @@ contract CommitRevealAIJudge is PrecompileConsumer {
         uint64 revealDeadline
     );
 
+    event CommitmentSubmitted(
+        uint256 indexed bountyId,
+        uint256 indexed submissionIndex,
+        address indexed submitter,
+        bytes32 commitment
+    );
+
     // ─────────────────────────────────────────────────────────────────────────
     //  Errors
     // ─────────────────────────────────────────────────────────────────────────
@@ -123,6 +130,10 @@ contract CommitRevealAIJudge is PrecompileConsumer {
     error RewardRequired();
     error InvalidDeadlines();
     error BountyNotFound();
+    error SubmissionPhaseOver();
+    error ZeroCommitment();
+    error AlreadyCommitted();
+    error TooManySubmissions();
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Modifiers
@@ -176,6 +187,55 @@ contract CommitRevealAIJudge is PrecompileConsumer {
             msg.value,
             submissionDeadline,
             revealDeadline
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Submission phase — commitments only (answers stay hidden)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Submit a commitment hash during the submission phase. The plaintext
+     *         answer is NOT revealed here — only its hash is stored on-chain.
+     * @dev    The expected commitment is
+     *           keccak256(abi.encodePacked(answer, salt, msg.sender, bountyId)).
+     *         A participant may commit only once per bounty.
+     * @param  bountyId   Target bounty.
+     * @param  commitment The keccak256 commitment to the (answer, salt) pair.
+     */
+    function submitCommitment(
+        uint256 bountyId,
+        bytes32 commitment
+    ) external bountyExists(bountyId) {
+        Bounty storage bounty = bounties[bountyId];
+
+        if (block.timestamp >= bounty.submissionDeadline) {
+            revert SubmissionPhaseOver();
+        }
+        if (commitment == bytes32(0)) revert ZeroCommitment();
+        if (bounty.committerIndexPlusOne[msg.sender] != 0) {
+            revert AlreadyCommitted();
+        }
+        if (bounty.submissions.length >= MAX_SUBMISSIONS) {
+            revert TooManySubmissions();
+        }
+
+        bounty.submissions.push(
+            Submission({
+                submitter: msg.sender,
+                commitment: commitment,
+                answer: "",
+                revealed: false
+            })
+        );
+        // Store index + 1 so that the default value (0) reliably means "none".
+        bounty.committerIndexPlusOne[msg.sender] = bounty.submissions.length;
+
+        emit CommitmentSubmitted(
+            bountyId,
+            bounty.submissions.length - 1,
+            msg.sender,
+            commitment
         );
     }
 }
