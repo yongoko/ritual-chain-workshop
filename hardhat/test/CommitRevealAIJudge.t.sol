@@ -406,4 +406,84 @@ contract CommitRevealAIJudgeTest is Test {
         (, , bool revealed, ) = judge.getSubmission(id, 0);
         assertTrue(revealed, "reveal accepted at edge of window");
     }
+
+    // ── judging ─────────────────────────────────────────────────────────────────
+
+    /// Commit + reveal Alice and Bob, then warp past the reveal deadline.
+    function _twoRevealedReadyToJudge() internal returns (uint256 id) {
+        uint64 subDl;
+        uint64 revDl;
+        (id, subDl, revDl) = _createBounty();
+        bytes32 sa = bytes32(uint256(0x1));
+        bytes32 sb = bytes32(uint256(0x2));
+        _commit(alice, id, "alice answer", sa);
+        _commit(bob, id, "bob answer", sb);
+        vm.warp(subDl);
+        _reveal(alice, id, "alice answer", sa);
+        _reveal(bob, id, "bob answer", sb);
+        vm.warp(revDl);
+    }
+
+    function test_JudgeAll_RevertsNonOwner() public {
+        uint256 id = _twoRevealedReadyToJudge();
+        vm.prank(alice);
+        vm.expectRevert(CommitRevealAIJudge.NotBountyOwner.selector);
+        judge.judgeAll(id, hex"1234");
+    }
+
+    function test_JudgeAll_RevertsBeforeRevealDeadline() public {
+        (uint256 id, uint64 subDl, ) = _createBounty();
+        bytes32 s = bytes32(uint256(1));
+        _commit(alice, id, "a", s);
+        vm.warp(subDl);
+        _reveal(alice, id, "a", s); // revealed, but reveal window still open
+        vm.prank(owner);
+        vm.expectRevert(CommitRevealAIJudge.RevealPhaseNotOver.selector);
+        judge.judgeAll(id, hex"01");
+    }
+
+    function test_JudgeAll_RevertsWhenNothingRevealed() public {
+        (uint256 id, , uint64 revDl) = _createBounty();
+        _commit(alice, id, "a", bytes32(uint256(1))); // committed, never revealed
+        vm.warp(revDl);
+        vm.prank(owner);
+        vm.expectRevert(CommitRevealAIJudge.NoRevealedSubmissions.selector);
+        judge.judgeAll(id, hex"01");
+    }
+
+    function test_JudgeAll_StoresReviewInSingleBatchedCall() public {
+        uint256 id = _twoRevealedReadyToJudge();
+        bytes memory input = hex"deadbeefcafe";
+        vm.prank(owner);
+        judge.judgeAll(id, input);
+
+        CommitRevealAIJudge.BountyView memory b = judge.getBounty(id);
+        assertTrue(b.judged, "marked judged");
+        assertEq(b.aiReview, judge.review(), "stores the review bytes");
+        assertEq(b.revealedCount, 2, "two revealed answers judged");
+        assertEq(judge.judgeCalls(), 1, "exactly one LLM call (batched)");
+        assertEq(judge.lastLlmInput(), input, "forwards the batch input as-is");
+    }
+
+    function test_JudgeAll_RevertsDoubleJudge() public {
+        uint256 id = _twoRevealedReadyToJudge();
+        vm.prank(owner);
+        judge.judgeAll(id, hex"01");
+        vm.prank(owner);
+        vm.expectRevert(CommitRevealAIJudge.AlreadyJudged.selector);
+        judge.judgeAll(id, hex"02");
+    }
+
+    function test_JudgeAll_PropagatesInferenceError() public {
+        uint256 id = _twoRevealedReadyToJudge();
+        judge.setShouldFail(true);
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CommitRevealAIJudge.JudgingFailed.selector,
+                "forced failure"
+            )
+        );
+        judge.judgeAll(id, hex"01");
+    }
 }
